@@ -1,0 +1,92 @@
+
+#define BLYNK_PRINT Serial
+#define BLYNK_TEMPLATE_ID "TMPL6FMJN0670" 
+#define BLYNK_TEMPLATE_NAME "ProjectWatering"  
+#define BLYNK_AUTH_TOKEN "ivkEjPkJ-i3I_4Tz6AIQCsaWn9tq7MaM" 
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h> 
+#include <BlynkSimpleEsp32.h>
+#include <UniversalTelegramBot.h>
+#include <ArduinoJson.h>
+
+char ssid[] = "พม่างง";     
+char pass[] = "1234567890"; 
+#define BOTtoken "8212748170:AAGEL4GdOW39K0gWiJ5x3EkRQ6T-Cv5S0io" 
+#define CHAT_ID "8239043655" 
+
+#define SENSOR_PIN 34      
+#define RELAY_PIN 27      
+
+const int WET_THRESHOLD = 2000; 
+
+WiFiClientSecure clientSecure;
+UniversalTelegramBot bot(BOTtoken, clientSecure);
+BlynkTimer timer;
+bool isWatering = false; 
+
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW); 
+  
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass); 
+  clientSecure.setCACert(TELEGRAM_CERTIFICATE_ROOT); 
+  bot.sendMessage(CHAT_ID, "ระบบรดน้ำ: พร้อมทำงาน (รอคำสั่ง)", "");
+  
+  timer.setInterval(1000L, checkWateringStatus);
+  timer.setInterval(5000L, updateGauge);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
+
+
+void updateGauge() {
+  int moistureValue = analogRead(SENSOR_PIN);
+  Blynk.virtualWrite(V0, moistureValue); 
+}
+
+void checkWateringStatus() {
+  if (isWatering) {
+    int moistureValue = analogRead(SENSOR_PIN);
+    Blynk.virtualWrite(V0, moistureValue); 
+    
+    Serial.print("กำลังรดน้ำ... ค่าความชื้น: ");
+    Serial.println(moistureValue);
+
+    if (moistureValue <= WET_THRESHOLD) {
+      Serial.println("ดินเปียกแล้ว! หยุดรดน้ำ (Auto)");
+      digitalWrite(RELAY_PIN, LOW); 
+      isWatering = false; 
+      bot.sendMessage(CHAT_ID, "รดน้ำเสร็จแล้ว ดินชื้นพอดี", "");
+      Blynk.virtualWrite(V1, 0); 
+    }
+  }
+}
+
+BLYNK_WRITE(V1) {
+  if (param.asInt() == 1) { 
+    if (isWatering) {
+      return; 
+    }
+
+    int currentMoisture = analogRead(SENSOR_PIN);
+    if (currentMoisture <= WET_THRESHOLD) {
+        Serial.println("ดินเปียกอยู่แล้ว ไม่ต้องรด");
+        bot.sendMessage(CHAT_ID, "คำสั่งรดน้ำ: ดินเปียกอยู่แล้ว", "");
+        bot.sendMessage(CHAT_ID, "", "");
+        Blynk.virtualWrite(V1, 0); 
+        return;
+    }
+
+    Serial.println("ได้รับคำสั่งรดน้ำ!");
+    bot.sendMessage(CHAT_ID, "กำลังเริ่มรดน้ำตามคำสั่ง...", "");
+    isWatering = true; 
+    digitalWrite(RELAY_PIN, HIGH); 
+  }
+}
