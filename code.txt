@@ -1,0 +1,167 @@
+#define BLYNK_PRINT Serial
+#define BLYNK_TEMPLATE_ID "TMPL6FMJN0670" 
+#define BLYNK_TEMPLATE_NAME "ProjectWatering"  
+#define BLYNK_AUTH_TOKEN "ivkEjPkJ-i3I_4Tz6AIQCsaWn9tq7MaM" 
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h> 
+#include <BlynkSimpleEsp32.h>
+#include <UniversalTelegramBot.h>
+#include <ArduinoJson.h>
+
+// --- WiFi & Telegram Config ---
+char ssid[] = "พม่างง";     
+char pass[] = "1234567890"; 
+#define BOTtoken "8212748170:AAGEL4GdOW39K0gWiJ5x3EkRQ6T-Cv5S0io" 
+#define CHAT_ID "8239043655" 
+
+// --- Pin Config ---
+#define SENSOR_PIN 34      
+#define RELAY_PIN 27      
+
+// --- Thresholds (ค่าเกณฑ์) ---
+const int WET_THRESHOLD = 2000; // ค่าที่ถือว่า "เปียก" (ค่ายิ่งน้อยยิ่งเปียก)
+const int DRY_THRESHOLD = 3000; // ค่าที่ถือว่า "แห้ง" (ค่ายิ่งมากยิ่งแห้ง) <-- ADDED
+
+// --- Global Objects & Variables ---
+WiFiClientSecure clientSecure;
+UniversalTelegramBot bot(BOTtoken, clientSecure);
+BlynkTimer timer;
+
+bool isWatering = false; // สถานะ: กำลังรดน้ำหรือไม่
+bool isAutoMode = false; // สถานะ: โหมด Auto (true) หรือ Manual (false) <-- ADDED
+
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW); // สั่งปิดปั๊มน้ำตอนเริ่ม
+  
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass); 
+  clientSecure.setCACert(TELEGRAM_CERTIFICATE_ROOT); 
+  
+  // <-- MODIFIED (Added emoji + default mode)
+  bot.sendMessage(CHAT_ID, "✅🤖 ระบบรดน้ำ: พร้อมทำงาน (โหมด Manual)", "");
+  
+  // ตั้งเวลาการทำงาน
+  timer.setInterval(1000L, checkWateringStatus); // ตรวจสอบการหยุดรดน้ำ (เมื่อดินเปียก)
+  timer.setInterval(5000L, updateGauge);        // อัปเดตเกจวัดความชื้น
+  timer.setInterval(30000L, checkAutoWatering);  // ตรวจสอบว่าดินแห้งหรือไม่ (สำหรับโหมด Auto) <-- ADDED
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
+
+// --- ฟังก์ชันสำหรับอัปเดตเกจ V0 ---
+void updateGauge() {
+  int moistureValue = analogRead(SENSOR_PIN);
+  Blynk.virtualWrite(V0, moistureValue); 
+}
+
+// --- ฟังก์ชันตรวจสอบการหยุดรดน้ำ (เมื่อดินเปียก) ---
+void checkWateringStatus() {
+  if (isWatering) {
+    int moistureValue = analogRead(SENSOR_PIN);
+    Blynk.virtualWrite(V0, moistureValue); 
+    
+    Serial.print("กำลังรดน้ำ... ค่าความชื้น: ");
+    Serial.println(moistureValue);
+
+    // ถ้าดินเปียกถึงเกณฑ์
+    if (moistureValue <= WET_THRESHOLD) {
+      Serial.println("ดินเปียกแล้ว! หยุดรดน้ำ (Auto-Stop)");
+      digitalWrite(RELAY_PIN, LOW); 
+      isWatering = false; 
+      
+      // <-- MODIFIED (Added emoji)
+      bot.sendMessage(CHAT_ID, "🌱😊 รดน้ำเสร็จแล้ว ดินชื้นพอดี", "");
+      
+      Blynk.virtualWrite(V1, 0); // สั่งให้ปุ่ม V1 เด้งกลับเป็น OFF
+    }
+  }
+}
+
+// --- (ADDED) ฟังก์ชันสำหรับโหมด Auto (ตรวจสอบว่าดินแห้งหรือไม่) ---
+void checkAutoWatering() {
+  // จะทำงานต่อเมื่อ: 1. อยู่ในโหมด Auto และ 2. ไม่ได้กำลังรดน้ำอยู่
+  if (!isAutoMode || isWatering) {
+    return;
+  }
+
+  int moistureValue = analogRead(SENSOR_PIN);
+  Blynk.virtualWrite(V0, moistureValue); // อัปเดตเกจด้วย
+
+  // ถ้าดินแห้งถึงเกณฑ์
+  if (moistureValue > DRY_THRESHOLD) {
+    Serial.println("ดินแห้ง! เริ่มรดน้ำอัตโนมัติ");
+    
+    // <-- MODIFIED (Added emoji)
+    bot.sendMessage(CHAT_ID, "🥵 ดินแห้ง! ระบบกำลังเริ่มรดน้ำอัตโนมัติ...", "");
+    
+    isWatering = true; 
+    digitalWrite(RELAY_PIN, HIGH); // สั่งเปิดปั๊ม
+    Blynk.virtualWrite(V1, 1);     // อัปเดตปุ่ม V1 ในแอปให้เป็น ON
+  }
+}
+
+
+// --- (MODIFIED) ฟังก์ชันรับคำสั่งจากปุ่ม Manual (V1) ---
+BLYNK_WRITE(V1) {
+  if (param.asInt() == 1) { 
+    // --- ผู้ใช้กด "เปิด" ---
+    
+    // ตรวจสอบว่าอยู่ในโหมด Auto หรือไม่
+    if (isAutoMode) {
+      Serial.println("กดปุ่ม V1 แต่ระบบอยู่ในโหมด Auto");
+      bot.sendMessage(CHAT_ID, "🤔 ไม่สามารถรดน้ำ Manual ได้ (ระบบอยู่ในโหมด Auto)", "");
+      Blynk.virtualWrite(V1, 0); // บังคับปุ่มกลับเป็น OFF
+      return;
+    }
+
+    // ถ้ากำลังรดน้ำอยู่แล้ว ให้เมินคำสั่ง
+    if (isWatering) {
+      return; 
+    }
+
+    // ตรวจสอบว่าดินเปียกอยู่แล้วหรือไม่
+    int currentMoisture = analogRead(SENSOR_PIN);
+    if (currentMoisture <= WET_THRESHOLD) {
+        Serial.println("ดินเปียกอยู่แล้ว ไม่ต้องรด");
+        // <-- MODIFIED (Added emoji)
+        bot.sendMessage(CHAT_ID, "🤔 ดินเปียกอยู่แล้ว (Manual)", "");
+        Blynk.virtualWrite(V1, 0); 
+        return;
+    }
+
+    // ถ้าผ่านทุกเงื่อนไข = เริ่มรดน้ำ
+    Serial.println("ได้รับคำสั่งรดน้ำ!");
+    // <-- MODIFIED (Added emoji)
+    bot.sendMessage(CHAT_ID, "💧🏃‍♂️ กำลังเริ่มรดน้ำตามคำสั่ง (Manual)...", "");
+    isWatering = true; 
+    digitalWrite(RELAY_PIN, HIGH); 
+    
+  } else {
+    // --- ผู้ใช้กด "ปิด" (สั่งหยุด Manual) ---
+    if (isWatering) {
+      Serial.println("หยุดรดน้ำด้วยตนเอง!");
+      digitalWrite(RELAY_PIN, LOW); 
+      isWatering = false; 
+      // <-- MODIFIED (Added emoji)
+      bot.sendMessage(CHAT_ID, "🛑 หยุดรดน้ำตามคำสั่ง Manual", "");
+    }
+  }
+}
+BLYNK_WRITE(V2) {
+  isAutoMode = param.asInt() == 1; // 1 = Auto, 0 = Manual
+
+  if (isAutoMode) {
+    Serial.println("เปลี่ยนเป็นโหมดอัตโนมัติ");
+    bot.sendMessage(CHAT_ID, "โหมดอัตโนมัติ: ทำงาน 🤖 (ระบบจะรดน้ำเองเมื่อดินแห้ง)", "");
+  } else {
+    Serial.println("เปลี่ยนเป็นโหมด Manual");
+    bot.sendMessage(CHAT_ID, "โหมด Manual: รอคำสั่ง 🙋‍♂️ (กรุณากดปุ่มเพื่อรดน้ำ)", "");
+  }
+}
